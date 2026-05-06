@@ -650,11 +650,30 @@ def browser_login(phone: str, password: str, profile_dir: str = PROFILE_DIR, hea
     os.makedirs(os.path.join(_PROJECT_ROOT, "log"), exist_ok=True)
     profile_dir = os.path.join(profile_dir, phone)
     with sync_playwright() as p:
+        # 反检测配置（保守版本，避免破坏页面功能）
         context = p.chromium.launch_persistent_context(
             user_data_dir=profile_dir,
             headless=headless,
             viewport={"width": 1280, "height": 800},
+            # 模拟真实浏览器环境
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+            # 容器环境必需参数
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+            ],
         )
+        # 基础反检测脚本
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => false });
+            delete window.cdc_asyncScript;
+            delete window.cdc_file;
+            Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
+            window.chrome = { runtime: {} };
+        """)
         page = context.new_page()
 
         logger.info(f"使用 Playwright 打开登录页，账号：{phone}")

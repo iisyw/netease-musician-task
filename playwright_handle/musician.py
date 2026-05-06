@@ -129,11 +129,27 @@ def open_vip_right_page_and_listen(
 
     def _run_once(_cookie_str: str | None) -> int | None:
         with sync_playwright() as p:
+            # 反检测配置（保守版本）
             context = p.chromium.launch_persistent_context(
                 user_data_dir=profile_dir,
                 headless=True,
                 viewport={"width": 1280, "height": 800},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                locale="zh-CN",
+                timezone_id="Asia/Shanghai",
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                ],
             )
+            context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => false });
+                delete window.cdc_asyncScript;
+                delete window.cdc_file;
+                Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
+                window.chrome = { runtime: {} };
+            """)
             page = context.new_page()
 
             if _cookie_str:
@@ -191,9 +207,28 @@ def open_vip_right_page_and_listen(
 
                 logger.info("找到 VIP 续期/领取按钮，准备点击并监听 vip/info 接口...")
                 try:
-                    # 用 context 级别监听，避免点击导致原 page 被替换/关闭
+                    # 先滚动到元素位置，确保可见
+                    renew_btn.scroll_into_view_if_needed()
+                    page.wait_for_timeout(500)
+
+                    # 同时监听新页面打开和接口响应
                     with context.expect_event("response", predicate=_is_target, timeout=timeout_ms) as resp_info:
-                        renew_btn.click()
+                        # 监听新页面（点击可能会打开新标签页）
+                        with context.expect_page(timeout=5000) as new_page_info:
+                            # 使用 force=True 强制点击，绕过覆盖层检查
+                            renew_btn.click(force=True)
+
+                        # 如果打开了新页面，等待其加载并等待接口响应
+                        try:
+                            new_page = new_page_info.value
+                            logger.info("检测到新页面打开，等待 VIP 权益页加载...")
+                            new_page.wait_for_load_state("domcontentloaded", timeout=10000)
+                            # 等待一段时间让页面完成自动领取操作
+                            new_page.wait_for_timeout(3000)
+                            logger.info("VIP 权益页已加载，等待自动领取完成...")
+                        except Exception as e:
+                            logger.info(f"未检测到新页面或新页面加载超时（可能在当前页操作）：{e}")
+
                     resp = resp_info.value
                     data = resp.json()
                     return _parse_vip_info_payload(
@@ -290,11 +325,27 @@ def get_musician_cycle_mission_by_playwright(
 
     def _run_once(_cookie_str: str | None) -> dict[str, Any]:
         with sync_playwright() as p:
+            # 反检测配置（保守版本）
             context = p.chromium.launch_persistent_context(
                 user_data_dir=profile_dir,
                 headless=True,
                 viewport={"width": 1280, "height": 800},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                locale="zh-CN",
+                timezone_id="Asia/Shanghai",
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                ],
             )
+            context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => false });
+                delete window.cdc_asyncScript;
+                delete window.cdc_file;
+                Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
+                window.chrome = { runtime: {} };
+            """)
             page = context.new_page()
 
             # 先注入 cookie（如果有），避免打开后是未登录态

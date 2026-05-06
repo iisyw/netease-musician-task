@@ -6,3 +6,4 @@ __pycache__/
 */.playwright_profile_netease
 debug/
 test/
+.claude/
