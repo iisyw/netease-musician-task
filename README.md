@@ -78,7 +78,7 @@ Docker 会自动拉取适合你系统架构的镜像版本。
 ## 依赖要求
 
 - **Python**：建议 3.12，需安装 `requirements.txt`
-- **Redis**：必须，用于任务与登录态
+- **Redis**：推荐，用于任务与登录态；不可用时会自动降级到本地 JSON 文件
 - **Node.js**：推荐安装；用于通过 `execjs` 执行 `checkToken.js` 生成 `checkToken`。若缺少可用的 JS 运行时，音乐人相关接口可能返回 `301 用户未登陆`。
 - **Playwright 浏览器**：使用 `LOGIN_METHOD=playwright` 或运行 `playwright_handle/login.py` 前需执行：`python -m playwright install chromium`
 - **Docker**（可选）：容器化部署
@@ -107,21 +107,41 @@ pip install -r requirements.txt
 python -m playwright install chromium
 ```
 
-### 4. 配置 Redis
+### 4. 配置账号任务
 
-见下文 [环境变量说明](#环境变量说明)。通过 `REDIS_URL` 连接你的 Redis 实例。
-
-### 5. 添加用户任务
-
-在 Redis 的哈希表 `netease:music:task` 中为每个任务写入账号信息，例如：
+推荐使用 Redis：见下文 [环境变量说明](#环境变量说明)，通过 `REDIS_URL` 连接你的 Redis 实例，并在 Redis 的哈希表 `netease:music:task` 中为每个任务写入账号信息，例如：
 
 ```bash
 HSET netease:music:task <task_key> '{"phone": "13800138000", "password": "your_password"}'
 ```
 
-- `<task_key>`：任务唯一标识（自定义字符串）
+Redis 连接失败时会自动降级到本地 JSON 文件。可复制示例文件后编辑：
+
+```bash
+cp accounts.example.json accounts.json
+```
+
+`accounts.json` 示例：
+
+```json
+{
+  "accounts": [
+    {
+      "task_key": "task1",
+      "phone": "13800138000",
+      "password": "your_password",
+      "uid": "optional_uid",
+      "enabled": true
+    }
+  ]
+}
+```
+
+- `<task_key>` / `task_key`：任务唯一标识（自定义字符串）
 - `phone`：网易云登录账号（手机号）
 - `password`：密码（Playwright 与 API 登录均可能用到）
+- `uid`：本地 JSON 模式可选；不填时默认使用手机号作为任务标识
+- `enabled`：本地 JSON 模式可选；设为 `false` 时跳过该账号
 
 ---
 
@@ -131,7 +151,9 @@ HSET netease:music:task <task_key> '{"phone": "13800138000", "password": "your_p
 
 | 环境变量 | 说明 | 默认值 |
 | --- | --- | --- |
-| `REDIS_URL` | Redis 连接地址 | `redis://localhost:6379/5` |
+| `REDIS_URL` | Redis 连接地址，连接失败时自动降级本地 JSON | `redis://localhost:6379/5` |
+| `ACCOUNTS_FILE` | 本地 JSON 降级模式的账号配置文件路径 | `accounts.json` |
+| `TASK_STATE_FILE` | 本地 JSON 降级模式的任务状态文件路径 | `data/task_state.json` |
 | `SEND_TIME` | 每日调度触发时间（`HH:MM`） | `09:30` |
 | `EXECUTION_INTERVAL_DAYS` | 分享类间隔任务的最小间隔天数 | `3` |
 | `MAX_MONTHLY_SENDS` | 每月分享次数上限 | `4` |
@@ -144,6 +166,8 @@ HSET netease:music:task <task_key> '{"phone": "13800138000", "password": "your_p
 
 ```bash
 export REDIS_URL="redis://localhost:6379/5"
+export ACCOUNTS_FILE="accounts.json"          # 仅 Redis 不可用时使用
+export TASK_STATE_FILE="data/task_state.json" # 仅 Redis 不可用时使用
 export SEND_TIME="09:30"
 export EXECUTION_INTERVAL_DAYS="7"
 export MAX_MONTHLY_SENDS="4"
@@ -298,10 +322,15 @@ docker run -d --name netease-musician-task \
 | `log/netease_music.log` | 核心业务日志 |
 | `debug/{手机号}/` | Playwright 登录失败等场景的页面截图（**项目根目录**，非 `playwright_handle` 下） |
 | `.playwright_profiles/` | 默认 Playwright 用户数据目录（可通过 `PLAYWRIGHT_PROFILE_BASEDIR` 修改；建议加入 `.gitignore`） |
+| `accounts.example.json` | 本地 JSON 降级模式账号配置示例，可复制为 `accounts.json` |
+| `accounts.json` | 本地 JSON 降级模式真实账号配置（已加入 `.gitignore`） |
+| `data/task_state.json` | 本地 JSON 降级模式状态文件，保存执行记录与 VIP 下次领取时间 |
 
 ---
 
 ## Redis 键说明（摘要）
+
+以下键仅在 Redis 连接成功、使用 Redis 存储模式时生效；Redis 不可用时会改用本地 `accounts.json` 与 `data/task_state.json`。
 
 | 键 | 用途 |
 | --- | --- |
@@ -318,7 +347,9 @@ docker run -d --name netease-musician-task \
 netease-musician-task/
 ├── main.py                 # 定时任务入口
 ├── core.py                 # 登录、任务、API 封装
-├── config.py               # 环境变量与 Redis 初始化
+├── config.py               # 环境变量与存储配置
+├── storage.py              # Redis 优先、本地 JSON 降级的存储适配
+├── accounts.example.json   # 本地 JSON 降级模式账号配置示例
 ├── checkToken.js           # checkToken 生成（需 Node/execjs）
 ├── requirements.txt
 ├── Dockerfile

@@ -5,5 +5,7 @@ __pycache__/
 .playwright_profiles/
 */.playwright_profile_netease
 debug/
+accounts.json
+data/
 test/
 .claude/

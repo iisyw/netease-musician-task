@@ -1,7 +1,6 @@
 import logging
 import json
 import time
-import redis
 from datetime import datetime, date, timedelta
 from logging.handlers import RotatingFileHandler
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -12,12 +11,12 @@ from core import AuthManager, TaskManager, logger
 
 # 从配置文件导入所有配置
 from config import (
-    REDIS_KEY, REDIS_CONF, REDIS_POOL,
     MAX_MONTHLY_SENDS, SEND_TIME, EXECUTION_INTERVAL_DAYS,
     LOGIN_METHOD,
     PLAYWRIGHT_PROFILE_BASEDIR, PLAYWRIGHT_PROFILE_PER_USER,
     WECOM_WEBHOOK_KEY,
 )
+from storage import create_storage
 
 import os, sys, random
 
@@ -48,66 +47,22 @@ if not has_cron_handler:
     cron_file_handler.setFormatter(formatter)
     logger.addHandler(cron_file_handler)
 
-# 使用配置中的Redis连接池创建Redis客户端
-# 注意：Redis连接日志已在config.py中记录，这里不再重复记录
-try:
-    if REDIS_POOL:
-        redis_client = redis.Redis(connection_pool=REDIS_POOL)
-        redis_client.ping()
-    else:
-        # 如果连接池未初始化，使用配置创建连接
-        redis_client = redis.Redis(**REDIS_CONF) if REDIS_CONF else None
-        if redis_client:
-            redis_client.ping()
-        else:
-            logger.error("Redis配置未初始化")
-            redis_client = None
-except Exception as e:
-    logger.error(f"Redis连接失败: {e}")
-    redis_client = None
-
-VIP_FURTHER_GET_TIME_KEY_TPL = "netease:music:user:{uid}:vip:furtherVipGetTime"
-
-
-def _vip_key(user_uid) -> str:
-    return VIP_FURTHER_GET_TIME_KEY_TPL.format(uid=str(user_uid))
+storage = create_storage(logger)
 
 
 def get_vip_further_get_time_ms(user_uid) -> int | None:
-    """从 Redis 获取用户下次可领取 VIP 的时间（ms）。"""
-    if not redis_client:
-        return None
+    """获取用户下次可领取 VIP 的时间（ms）。"""
     try:
-        v = redis_client.get(_vip_key(user_uid))
-        if v is None:
-            return None
-        if isinstance(v, (bytes, bytearray)):
-            v = v.decode("utf-8", errors="ignore")
-        v = str(v).strip()
-        if not v:
-            return None
-        # 兼容存成 JSON/字符串数字的场景
-        if v.isdigit():
-            return int(v)
-        try:
-            obj = json.loads(v)
-            if isinstance(obj, (int, float)):
-                return int(obj)
-            if isinstance(obj, str) and obj.isdigit():
-                return int(obj)
-        except Exception:
-            pass
+        return storage.get_vip_further_get_time_ms(user_uid)
     except Exception as e:
         logger.error(f"读取用户 {user_uid} 的 VIP furtherVipGetTime 失败: {e}")
     return None
 
 
 def set_vip_further_get_time_ms(user_uid, ms: int) -> None:
-    """把用户下次可领取 VIP 的时间（ms）存到 Redis。"""
-    if not redis_client:
-        return
+    """保存用户下次可领取 VIP 的时间（ms）。"""
     try:
-        redis_client.set(_vip_key(user_uid), str(int(ms)))
+        storage.set_vip_further_get_time_ms(user_uid, ms)
     except Exception as e:
         logger.error(f"保存用户 {user_uid} 的 VIP furtherVipGetTime 失败: {e}")
 
@@ -119,34 +74,23 @@ def _fmt_ms(ms: int) -> str:
         return str(ms)
 
 
-# Redis存储管理函数
+# 存储管理函数
 def load_send_records():
-    """从Redis加载发送记录"""
-    if not redis_client:
-        logger.error("Redis客户端未初始化，无法加载发送记录")
-        return {}
-    
+    """加载发送记录"""
     try:
-        data = redis_client.get(REDIS_KEY)
-        if data:
-            return json.loads(data)
+        return storage.load_send_records()
     except json.JSONDecodeError:
-        logger.error("Redis中的数据不是有效的JSON格式")
+        logger.error("存储中的发送记录不是有效的JSON格式")
     except Exception as e:
-        logger.error(f"从Redis加载数据时发生错误: {e}")
+        logger.error(f"加载发送记录时发生错误: {e}")
     return {}
 
 def save_send_records(data):
-    """保存发送记录到Redis"""
-    if not redis_client:
-        logger.error("Redis客户端未初始化，无法保存发送记录")
-        return False
-    
+    """保存发送记录"""
     try:
-        redis_client.set(REDIS_KEY, json.dumps(data, ensure_ascii=False))
-        return True
+        return storage.save_send_records(data)
     except Exception as e:
-        logger.error(f"保存数据到Redis时发生错误: {e}")
+        logger.error(f"保存发送记录时发生错误: {e}")
         return False
 
 def should_execute_task(user_uid):
@@ -208,7 +152,7 @@ def update_last_send_record(user_uid):
     send_records[str(user_uid)] = user_record
     
     if save_send_records(send_records):
-        logger.info(f"已更新用户 {user_uid} 的最后发送记录到Redis: {today_str}")
+        logger.info(f"已更新用户 {user_uid} 的最后发送记录: {today_str}")
         logger.info(f"用户 {user_uid} {current_year_month} 月发送次数已更新为 {monthly_sends[current_year_month]}/{MAX_MONTHLY_SENDS}")
     else:
         logger.error(f"更新用户 {user_uid} 的最后发送记录失败")
@@ -258,14 +202,10 @@ def daily_task_runner():
     # 汇总给企业微信的精简结果（按用户聚合），避免推送完整日志
     daily_wecom_lines: list[str] = []
 
-    # 为 Redis / 用户列表获取增加重试，避免短暂网络问题导致本次任务完全跳过
+    # 为用户列表获取增加重试，避免短暂存储问题导致本次任务完全跳过
     def _load_users_for_daily():
         try:
             auth_local = AuthManager()
-            # 如果 Redis 未就绪，视为失败以触发重试
-            if not getattr(auth_local, "redis", None):
-                logger.error("Redis 未就绪，获取每日任务用户列表失败，准备重试")
-                return None
             user_list_local = auth_local.get_all_users_credentials()
             # 正常情况下，0 个用户也算成功（可能本来就没配置用户）
             return auth_local, user_list_local
@@ -294,14 +234,14 @@ def daily_task_runner():
             task_name="加载每日任务用户列表",
         )
         if not load_res:
-            logger.error("多次重试后仍无法从 Redis 获取每日任务用户列表，本次每日任务终止")
-            # Redis 多次重试仍失败时，发送简要企业微信通知
+            logger.error("多次重试后仍无法获取每日任务用户列表，本次每日任务终止")
+            # 用户列表多次读取失败时，发送简要企业微信通知
             try:
                 if WECOM_WEBHOOK_KEY:
                     from wecom_notify import send_wecom_webhook
                     send_wecom_webhook(
                         WECOM_WEBHOOK_KEY,
-                        "Redis连接失败，跳过执行",
+                        "用户列表读取失败，跳过执行",
                         title="网易音乐人日常任务",
                     )
             except Exception:
@@ -412,13 +352,13 @@ def daily_task_runner():
                     daily_task_res = task.daily_task()
                     logger.info(f"日常签到任务结果：{json.dumps(daily_task_res, ensure_ascii=False)[:100]}")
 
-                    # 任务执行完成后，更新Cookie到Redis
+                    # 任务执行完成后，更新Cookie
                     if client:
                         try:
                             fresh_cookie = client.get_cookie_str()
                             if fresh_cookie:
                                 auth.update_cookie(user['uid'], fresh_cookie)
-                                logger.info(f"用户 {user['uid']} 每日任务完成，已更新Cookie到Redis")
+                                logger.info(f"用户 {user['uid']} 每日任务完成，已更新Cookie")
                         except Exception as e:
                             logger.warning(f"更新用户 {user['uid']} Cookie失败: {e}")
 
@@ -476,14 +416,10 @@ def interval_task_runner():
     # 汇总给企业微信的精简结果（按用户聚合），避免推送完整日志
     interval_wecom_lines: list[str] = []
 
-    # 为 Redis / 用户列表获取增加重试，避免短暂网络问题导致本次任务完全跳过
+    # 为用户列表获取增加重试，避免短暂存储问题导致本次任务完全跳过
     def _load_users_for_interval():
         try:
             auth_local = AuthManager()
-            # 如果 Redis 未就绪，视为失败以触发重试
-            if not getattr(auth_local, "redis", None):
-                logger.error("Redis 未就绪，获取间隔任务用户列表失败，准备重试")
-                return None
             user_list_local = auth_local.get_all_users_credentials()
             # 正常情况下，0 个用户也算成功（可能本来就没配置用户）
             return auth_local, user_list_local
@@ -502,14 +438,14 @@ def interval_task_runner():
             task_name="加载间隔任务用户列表",
         )
         if not load_res:
-            logger.error("多次重试后仍无法从 Redis 获取间隔任务用户列表，本次间隔任务终止")
-            # Redis 多次重试仍失败时，发送简要企业微信通知
+            logger.error("多次重试后仍无法获取间隔任务用户列表，本次间隔任务终止")
+            # 用户列表多次读取失败时，发送简要企业微信通知
             try:
                 if WECOM_WEBHOOK_KEY:
                     from wecom_notify import send_wecom_webhook
                     send_wecom_webhook(
                         WECOM_WEBHOOK_KEY,
-                        "Redis连接失败，跳过执行",
+                        "用户列表读取失败，跳过执行",
                         title="网易音乐人发送任务",
                     )
             except Exception:
@@ -530,11 +466,11 @@ def interval_task_runner():
                 # 检查是否应该执行任务（距离上次执行>=设置的间隔天数）
                 # user_uid 已在循环开头计算
                 # 1) VIP 领取逻辑：
-                #    - 如果 Redis 中有 furtherVipGetTime：
+                #    - 如果存储中有 furtherVipGetTime：
                 #        * 今天 == 领取日：仅打开权益页自动领取并刷新时间，当天不发动态，也不做“距离上次执行不足X天”的检测
                 #        * 今天 > 领取日：说明之前异常未执行，本次先尝试补领，然后仍按正常逻辑检测/发动态
                 #        * 今天 < 领取日：未到日期，不额外处理
-                #    - 如果 Redis 中没有记录：不做额外处理，由正常发动态流程中的监听来写入首个时间
+                #    - 如果存储中没有记录：不做额外处理，由正常发动态流程中的监听来写入首个时间
                 if LOGIN_METHOD == "playwright":
                     try:
                         vip_ms = get_vip_further_get_time_ms(user_uid)
@@ -587,7 +523,7 @@ def interval_task_runner():
                                 # 当天以“领取 VIP”为主，不再进行发布动态的间隔检测/执行
                                 continue
 
-                            # 情况二：已经错过领取日（例如 Redis 写的是 3.8，今天是 3.12），本次先补领，再继续正常发动态逻辑
+                            # 情况二：已经错过领取日（例如存储里写的是 3.8，今天是 3.12），本次先补领，再继续正常发动态逻辑
                             if today > vip_date:
                                 logger.info(
                                     f"用户 {user_uid} 已错过 VIP 领取日期 {vip_date}，"
@@ -754,19 +690,19 @@ def interval_task_runner():
                         task_name=f"用户 {user['uid']} 的发布动态任务"
                     )
 
-                    # 任务执行完成后，更新Cookie到Redis
+                    # 任务执行完成后，更新Cookie
                     # playwright模式：使用浏览器返回的最新Cookie
                     # api模式：使用client当前的Cookie
                     if client:
                         try:
                             if LOGIN_METHOD == 'playwright' and fresh_cookie_from_browser:
                                 auth.update_cookie(user['uid'], fresh_cookie_from_browser)
-                                logger.info(f"用户 {user['uid']} 发布动态任务完成，已从浏览器更新Cookie到Redis")
+                                logger.info(f"用户 {user['uid']} 发布动态任务完成，已从浏览器更新Cookie")
                             else:
                                 fresh_cookie = client.get_cookie_str()
                                 if fresh_cookie:
                                     auth.update_cookie(user['uid'], fresh_cookie)
-                                    logger.info(f"用户 {user['uid']} 发布动态任务完成，已更新Cookie到Redis")
+                                    logger.info(f"用户 {user['uid']} 发布动态任务完成，已更新Cookie")
                         except Exception as e:
                             logger.warning(f"更新用户 {user['uid']} Cookie失败: {e}")
 

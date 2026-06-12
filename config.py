@@ -14,6 +14,10 @@ _logger = logging.getLogger('netease_music')
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/5')
 REDIS_KEY = 'netease:music:data'
 
+# Redis 不可用时的本地 JSON 降级配置
+ACCOUNTS_FILE = os.getenv('ACCOUNTS_FILE', 'accounts.json')
+TASK_STATE_FILE = os.getenv('TASK_STATE_FILE', os.path.join('data', 'task_state.json'))
+
 # Redis连接池配置
 REDIS_POOL = None
 REDIS_CONF = None
