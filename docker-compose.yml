@@ -11,10 +11,16 @@ services:
       - ./log:/app/log
       - ./playwright_profiles:/app/playwright_profiles
       - ./debug:/app/debug
+      # Redis 不可用时，本地 JSON 降级模式使用
+      - ./accounts.json:/app/accounts.json:ro
+      - ./data:/app/data
     environment:
       - TZ=Asia/Shanghai
-      # Redis连接URL，格式：redis://[password@]host:port/db
+      # Redis连接URL，格式：redis://[password@]host:port/db；连接失败时自动降级到本地 JSON
       - REDIS_URL=redis://localhost:6379/0
+      # 本地 JSON 降级模式配置
+      - ACCOUNTS_FILE=accounts.json
+      - TASK_STATE_FILE=data/task_state.json
       # 每日任务执行时间（格式：HH:MM）
       - SEND_TIME=09:30
       # 间隔任务的执行间隔天数
